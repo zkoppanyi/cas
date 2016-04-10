@@ -1,0 +1,322 @@
+%**************************************************************************
+% Written by Zoltan Koppanyi, OSU
+% E-mail: zoltan.koppanyi@gmail.com
+%**************************************************************************
+
+
+%% Settings
+clear all; clc;
+
+addpath('../Commons/');
+addpath('../VM/');
+
+is_plot = 0;
+bins_size = 0.5;
+offset = [0 0.9];
+
+%% Dataset2: dataset from simulation
+% load('../data/pc_cessna_ss_cv_v10');
+% [val idx] = min(data(:,1));
+% %data(:,6:8) = data(:,6:8) - repmat(mean(data(:,6:8)), size(data,1), 1);
+% ts = data(:,1)-min(data(:,1));
+% %ts = data(:,1);
+% model_cloud = [data(:,6:8), ts];
+% gaps_threshold = 0.05
+
+%% Dataset3: curvylinear motion
+% load('../data/scanners4');
+% all = scanners.plane_all;
+% ts0 = min(all(:,8));
+% all(:,8) = (all(:,8) - ts0)/(1000*1000);
+% all = all(and(1 < all(:,8), all(:,8) < 6), :);
+% all(:,8) = (all(:,8) - min(all(:,8)));
+% model_cloud = [all(:,1:3), all(:,8)];
+% [~, idx] = sort(model_cloud(:,4));
+% model_cloud = model_cloud(idx,:);
+% gaps_threshold = 0.05;
+
+%% Dataset1: dataset from multisensor test
+load('../data/scanners1');
+all = scanners.plane_all;
+ts0 = min(all(:,8));
+all(:,8) = (all(:,8) - ts0)/(1000*1000);
+all = all(and(0 < all(:,8), all(:,8) < 6), :);
+model_cloud = [all(:,1:3), all(:,8)];
+gaps_threshold = 0.05
+
+%% Separate frames
+newmc = [];
+gaps=find(diff(model_cloud(:,4)) > gaps_threshold);
+gaps=[1;gaps];
+for i = 2 : length(gaps),
+    idx = gaps(i-1):gaps(i);
+    newmc = [newmc; model_cloud(idx,:), repmat(i-1, length(idx), 1)];
+end;
+model_cloud = newmc;
+frame_num = length(gaps)-1;
+
+%% Approximated solution with Entropy minimization
+    results = [];
+
+settings.verbose          = 1;
+settings.bin_size         = 1;
+settings.n_neighb         = 100;
+settings.max_iter         = 200;
+settings.model            = 'CV2DoF';
+settings.metric           = 'volume';
+
+tic
+params = [0 0 0 0];
+params_baund = [100 100 100 100];
+[params, bins, cloud_res1, iter1] = mexEntropyMinimization(model_cloud, params, params_baund, settings);
+toc
+
+start_point = mean(cloud_res1, 1);
+start_point(1:2) = start_point(1:2) + offset;
+[~, trajectory_em] = mexReconstruct([ repmat(start_point(1:3), size(model_cloud,1), 1) model_cloud(:,4)], -params, settings);
+bins = mexCalcBins(cloud_res1, bins_size, 1, 1); 
+
+% params1 = [-8 0 0 0];
+% settings.model          = 'CV2DoF';
+% settings.bin_size       = 100;
+% settings.verbose        = 1;
+% [~, cloud_res1] = mexReconstruct(model_cloud, params1, settings);
+
+
+
+%% Check the solution
+
+if is_plot,
+    figure(1); clf; hold on;
+    set(gcf,'color','w');
+    
+    cols = repmat('rgbyckrgbyckrgbyckrgbyck',1,10);
+    for i = 1 : frame_num,
+        idx = find(model_cloud(:,end) == i);
+        plot3(cloud_res1(idx,1), cloud_res1(idx,2), cloud_res1(idx,3), [cols(i) '.']);
+    end;
+
+    for i = 1 : frame_num,
+        idx = find(model_cloud(:,end) == i);
+        plot3(model_cloud(idx,1), model_cloud(idx,2), model_cloud(idx,3), [cols(i) '.']);
+    end;   
+
+    draw_bins( bins, [bins_size, bins_size, bins_size]);
+    %legend('All points', 'CV model');
+    xlabel('X [m]'); ylabel('Y [m]');
+    set(gca, 'FontSize', 12);
+    grid on;
+    axis equal;
+end;
+
+%% Calcualte cube trajectories
+reconstructed_cloud = cloud_res1;
+A=[];lx=[];ly=[];w=[];
+prev_params = [Inf Inf];
+params_init = params;
+for niter = 1:10,
+    
+    
+    fprintf('\n\n================\n');
+    fprintf('Iteration #: %i\n', niter);
+    fprintf('Difference #: %i\n', abs(params(1) - prev_params(1)));
+    params    
+    
+    if abs(params(1) - prev_params(1)) < 0.01,
+        return;
+    end;
+    prev_params = params;    
+    
+    bins = mexCalcBins(reconstructed_cloud, bins_size, 1, 1); 
+    
+     figure(1); clf; hold on;
+    if is_plot,
+        subplot(2,1,1); hold on;
+        for i = 1 : frame_num,
+            idx = find(model_cloud(:,end) == i);
+            plot3(reconstructed_cloud(idx,1), reconstructed_cloud(idx,2), reconstructed_cloud(idx,3), [cols(i) '.']);
+        end;
+        for i = 1 : frame_num,
+            idx = find(model_cloud(:,end) == i);
+            plot3(model_cloud(idx,1), model_cloud(idx,2), model_cloud(idx,3), [cols(i) '.']);
+        end;
+
+        draw_bins( bins, [bins_size, bins_size, bins_size]);
+        xlabel('X [m]'); ylabel('Y [m]');
+        set(gca, 'FontSize', 16);
+        xlim([-15 25]);
+        grid on;
+        axis equal;
+    end;
+
+    
+    trajs = [];
+    for i = 1 : size(bins, 1),
+        xlb = bins(i, 1);
+        xub = bins(i, 1)+bins_size;
+        ylb = bins(i, 2);
+        yub = bins(i, 2)+bins_size;
+        zlb = bins(i, 3);
+        zub = bins(i, 3)+bins_size;
+        cubetraj = [];
+        for j = 1 : frame_num,
+            rpts = reconstructed_cloud(reconstructed_cloud(:,end) == j, :);            
+            pts = model_cloud(model_cloud(:,end) == j, :);
+            
+            idx = find(and(and(and(rpts(:,1) > xlb, rpts(:,1) < xub),  ...
+                           and(rpts(:,2) > ylb, rpts(:,2) < yub)),  ...
+                           and(rpts(:,3) > zlb, rpts(:,3) < zub))); 
+                       
+            if length(idx) > 0,
+                cubetraj = [cubetraj, mean(pts(idx,1:4), 1), length(idx)];
+            else
+                cubetraj = [cubetraj, NaN, NaN, NaN, NaN, NaN];        
+            end;
+            
+        end;
+        trajs = [trajs; cubetraj];
+    end;
+
+    %% Display cube trajectories
+    if is_plot,
+        subplot(2,1,1); hold on;
+        for i = 1 : size(trajs, 1),
+            pts = reshape(trajs(i,:),5, size(trajs, 2)/5)';
+            idx = find(~isnan(pts(:,4)));
+            if length(idx) > 6,
+                plot3(pts(idx,1), pts(idx,2), pts(idx,3), 'k.-');    
+            end;
+        end;
+    end;
+
+    %% Display coordinates     
+    ttr = []; xtr = []; ytr = [];        
+    subplot(2,1,2); hold on;
+    for i = 1 : size(trajs, 1),
+        pts = reshape(trajs(i,:),5, size(trajs, 2)/5)';     
+        idx = find(~isnan(pts(:,4)));
+        if length(idx) > 2,
+
+            pts = pts(idx,:);
+            pdijx = diff(pts(:,1)) ./ diff(pts(:,4));
+            pdijy = diff(pts(:,2)) ./ diff(pts(:,4));
+            ptij = (pts(2:end,4) + pts(1:length(idx)-1,4))/2;    
+            
+            idx2 = find(and(and(~isnan(pdijx), abs(pdijx)<abs(params_init(1))*3),abs(pdijy)<abs(params_init(2))*3));            
+            ptij = ptij(idx2);
+            pdijx = pdijx(idx2);
+            pdijy = pdijy(idx2);
+            
+            h1 = plot(ptij, pdijx, 'b.');        
+            h2 = plot(ptij, pdijy, 'r.'); 
+            
+            ttr = [ttr; ptij]; 
+            xtr = [xtr; pdijx]; 
+            ytr = [ytr; pdijy]; 
+                        
+        end;
+        
+    end;
+
+    ax = (sum((xtr-mean(xtr)).*(ttr-mean(ttr)))/(length(ttr)-1)) / (sum((ttr-mean(ttr)).^2)/(length(ttr)-1));
+    vx = mean(xtr) - mean(ttr)*ax;
+    ay = (sum((ytr-mean(ytr)).*(ttr-mean(ttr)))/(length(ttr)-1)) / (sum((ttr-mean(ttr)).^2)/(length(ttr)-1));
+    vy = mean(ytr) - mean(ttr)*ay;    
+    ax = -ax; vx = -vx; ay = -ay; vy = -vy;
+    params = [vx vy ax ay];
+        
+    t = model_cloud(:,4);
+    
+    subplot(2,1,2); hold on;
+    h3 = plot(t, -vx - t*ax, 'b-');
+    h4 = plot(t, -vy - t*ay, 'r-');
+    legend([h1 h2 h3 h4], {'Cube X velocity', 'Cube Y velocity', 'Cube X velocity estimation', 'Cube Y velocity estimation'}, 'Location','northoutside')
+    xlabel('Time [s]'); ylabel('v_x & v_y [m/s]');
+    ylim([-15 5])
+    set(gca, 'FontSize', 16);
+    
+    settings.model           = 'CA2DoF';
+    settings.bin_size       = 100;
+    settings.verbose        = 0;
+    start_point = mean(reconstructed_cloud, 1);
+    start_point(1:2) = start_point(1:2) + offset;
+    [~, trajectory_mot] = mexReconstruct([ repmat(start_point(1:3), size(model_cloud,1), 1) sort(model_cloud(:,4))], -params, settings);
+    [ent_icp, reconstructed_cloud] = mexReconstruct(model_cloud, [params start_point(1:2)], settings);
+    
+    if is_plot == 1,
+        frame = getframe(1);
+        im = frame2im(frame);
+        [imind,cm] = rgb2ind(im,256);
+        if niter == 1;
+              imwrite(imind,cm,'ct_reconstruction2.gif','gif', 'Loopcount',inf, 'DelayTime',1);
+        else
+              imwrite(imind,cm,'ct_reconstruction2.gif','gif','WriteMode','append', 'DelayTime',1);
+        end
+    end;
+    
+    %%
+    figure(2); clf; hold on;
+    set(gcf,'color','w');
+    plot3(cloud_res1(:,1), cloud_res1(:,2), cloud_res1(:,3), 'r.');
+    plot3(model_cloud(:,1), model_cloud(:,2), model_cloud(:,3), 'b.');
+    plot3(reconstructed_cloud(:,1), reconstructed_cloud(:,2), reconstructed_cloud(:,3), 'k.');
+    plot3(trajectory_em(:,1), trajectory_em(:,2), trajectory_em(:,3), 'r.-', 'LineWidth', 3);
+    plot3(trajectory_mot(:,1), trajectory_mot(:,2), trajectory_mot(:,3), 'k.-', 'LineWidth', 3);
+    legend('EM-CV Trajectory', 'Cube Trajetory Estimation');
+    xlabel('X [m]'); ylabel('Y [m]');
+    set(gca, 'FontSize', 16);
+    %xlim([-25 25]);
+    axis equal;
+    grid on;
+    
+    if is_plot == 1,
+        frame = getframe(2);
+        im = frame2im(frame);
+        [imind,cm] = rgb2ind(im,256);
+        if niter == 1;
+              imwrite(imind,cm,'ct_reconstruction.gif','gif', 'Loopcount',inf, 'DelayTime',1);
+        else
+              imwrite(imind,cm,'ct_reconstruction.gif','gif','WriteMode','append', 'DelayTime',1);
+        end
+
+        pause(1)
+    end;
+end;
+if is_plot == 1,
+    imwrite(imind,cm,'ct_reconstruction.gif','gif','WriteMode','append', 'DelayTime',2);
+    imwrite(imind,cm,'ct_reconstruction2.gif','gif','WriteMode','append', 'DelayTime',2);
+end;
+
+plot(3); clf; hold on;
+set(gcf,'color','w');
+subplot(1,2,1); hold on;
+plot3(cloud_res1(:,1), cloud_res1(:,2), cloud_res1(:,3), 'r.');
+xlabel('X [m]'); ylabel('Y [m]');
+set(gca, 'FontSize', 16);
+axis equal;
+
+subplot(1,2,2); hold on;
+plot3(reconstructed_cloud(:,1), reconstructed_cloud(:,2), reconstructed_cloud(:,3), 'k.');
+xlabel('X [m]'); ylabel('Y [m]');
+set(gca, 'FontSize', 16);
+axis equal;
+
+figure(4); clf; hold on;   
+plot3(trajectory_em(:,1), trajectory_em(:,2), trajectory_em(:,3), 'r.-', 'LineWidth', 3);
+plot3(trajectory_mot(:,1), trajectory_mot(:,2), trajectory_mot(:,3), 'k.-', 'LineWidth', 3);
+daspect([1 0.01 1]);
+xlabel('X [m]'); ylabel('Y [m]');
+set(gca, 'FontSize', 16);
+%axis equal;
+grid on;
+
+
+
+
+
+
+
+
+
+
+
